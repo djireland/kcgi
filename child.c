@@ -156,6 +156,7 @@ const char *const kmethods[KMETHOD__MAX] = {
 	"UNLOCK", /* KMETHOD_UNLOCK */
 };
 
+
 static	const char *const krequs[KREQU__MAX] = {
 	"HTTP_ACCEPT", /* KREQU_ACCEPT */
 	"HTTP_ACCEPT_CHARSET", /* KREQU_ACCEPT_CHARSET */
@@ -176,6 +177,26 @@ static	const char *const krequs[KREQU__MAX] = {
 	"HTTP_RANGE", /* KREQU_RANGE */
 	"HTTP_REFERER", /* KREQU_REFERER */
 	"HTTP_USER_AGENT", /* KREQU_USER_AGENT */
+
+        /* RFC 3875 Section 4.1 Request Meta-Variables */
+        "AUTH_TYPE", /* KREQU_AUTH_TYPE */
+        "CONTENT_LENGTH", /* KREQU_CONTENT_LENGTH */
+        "CONTENT_TYPE", /* KREQU_CONTENT_TYPE */
+        "GATEWAY_INTERFACE", /* KREQU_GATEWAY_INTERFACE */
+        "PATH_INFO", /* KREQU_PATH_INFO */
+        "PATH_TRANSLATED", /* KREQU_PATH_TRANSLATED */
+        "QUERY_STRING", /* KREQU_QUERY_STRING */
+        "REMOTE_ADDR", /* KREQU_REMOTE_ADDR */
+        "REMOTE_HOST", /* KREQU_REMOTE_HOST */
+        "REMOTE_IDENT",  /* KREQU_REMOTE_IDENT */
+        "REMOTE_USER", /* KREQU_REMOTE_USER */
+        "REQUEST_METHOD",  /* KREQU_REQUEST_METHOD */
+        "SCRIPT_NAME", /* KREQU_SCRIPT_NAME */
+        "SERVER_NAME", /* KREQU_SERVER_NAME */
+        "SERVER_PORT", /* KREQU_SERVER_PORT */
+        "SERVER_PROTOCOL",  /* KREQU_SERVER_PROTOCOL */
+        "SERVER_SOFTWARE", /* KREQU_SERVER_SOFTWARE */
+
 };
 
 static	const char *const kauths[KAUTH_UNKNOWN] = {
@@ -1021,67 +1042,93 @@ parse_multi(const struct parms *pp, char *line, char *b, size_t bsz)
 }
 
 /*
- * Output all of the HTTP_xxx headers.
+ * Output all server meta-variables and all of the HTTP_xxx headers.
  * This transforms the HTTP_xxx header (CGI form) into HTTP form, which
  * is the second part title-cased, e.g., HTTP_FOO = Foo.
+ * Processes additional implementation-defined extension meta-variables,
+ * whose names are be prefixed with "X_" per RFC 3875 4.1
  * Disallow zero-length values as per RFC 3875, 4.1.18.
  */
 static void
 kworker_child_env(const struct env *env, int fd, size_t envsz)
 {
-	size_t	 	 i, j, sz, reqs;
+        size_t	 	 i, j, sz, reqs;
 	int		 first;
 	enum krequ	 requ;
 	char		 c;
 	const char	*cp;
 
 	for (reqs = i = 0; i < envsz; i++)
-		if (0 == strncmp(env[i].key, "HTTP_", 5) &&
-		    '\0' != env[i].key[5])
-			reqs++;
+          if ((0 == strncmp(env[i].key, "HTTP_", 5) &&
+               '\0' != env[i].key[5]) ||
+              (0 == strncmp(env[i].key, "X_", 2) &&
+               '\0' != env[i].key[2]))
+            reqs++;
+          else {
+            for (j = 0; j < KREQU__MAX; j++) {
+              if (0 == strcmp(env[i].key, krequs[j]))  {
+                reqs++;
+                break;
+              }
+            }
+          }
 
 	fullwrite(fd, &reqs, sizeof(size_t));
 
 	for (i = 0; i < envsz; i++) {
 		/*
-		 * First, search for the key name (HTTP_XXX) in our list
+		 * First, search for the key name in our list
 		 * of known headers.
 		 * We must have non-zero-length keys.
 		 */
-
-		if (strncmp(env[i].key, "HTTP_", 5) || 
-		    '\0' == env[i].key[5])
-			continue;
-
-		for (requ = 0; requ < KREQU__MAX; requ++)
-			if (0 == strcmp(krequs[requ], env[i].key))
-				break;
-
-		fullwrite(fd, &requ, sizeof(enum krequ));
-
-		/*
-		 * According to RFC 3875, 4.1.18, HTTP headers are
-		 * re-written into CGI environment variables by
-		 * uppercasing and converting dashes to underscores.
-		 * In this part, we [try to] reverse that so that the
-		 * headers are properly identified.
-		 * (We also skip the HTTP_ leading part.)
-		 */
-
-		sz = env[i].keysz - 5;
-		cp = env[i].key + 5;
-		fullwrite(fd, &sz, sizeof(size_t));
-		for (j = 0, first = 1; j < sz; j++) {
-			if ('_' == cp[j]) {
-				c = '-';
-				first = 1;
-			} else if (first) {
-				c = cp[j];
-				first = 0;
-			} else
-				c = tolower((unsigned char)cp[j]);
-			fullwrite(fd, &c, 1);
-		}
+          for (requ = 0; requ < KREQU__MAX; requ++) {
+            if ((0 == strncmp(env[i].key, "HTTP_", 5) &&
+                 '\0' != env[i].key[5]) ||
+                (0 == strncmp(env[i].key, "X_", 2) &&
+                 '\0' != env[i].key[2]) ||
+                (0 ==  strcmp(env[i].key, krequs[requ])))
+              break;
+          }
+ 
+          if (requ == KREQU__MAX)
+            continue;
+          
+          for (requ = 0; requ < KREQU__MAX; requ++)
+            if (0 == strcmp(krequs[requ], env[i].key) ||
+                0 == strncmp(env[i].key, "X_", 2)) 
+              break;
+          
+          fullwrite(fd, &requ, sizeof(enum krequ));
+          
+          if (0 == strncmp(env[i].key, "HTTP_", 5)) {
+            
+                  /*
+                   * According to RFC 3875, 4.1.18, HTTP headers are
+                   * re-written into CGI environment variables by
+                   * uppercasing and converting dashes to underscores.
+                   * In this part, we [try to] reverse that so that the
+                   * headers are properly identified.
+                   * (We also skip the HTTP_ leading part.)
+                   */
+                  
+                  sz = env[i].keysz - 5;
+                  cp = env[i].key + 5;
+                  fullwrite(fd, &sz, sizeof(size_t));
+                  for (j = 0, first = 1; j < sz; j++) {
+                    if ('_' == cp[j]) {
+                      c = '-';
+                      first = 1;
+                    } else if (first) {
+                      c = cp[j];
+                      first = 0;
+                    } else
+                      c = tolower((unsigned char)cp[j]);
+                    fullwrite(fd, &c, 1);
+                  }
+                } else {
+                  fullwrite(fd, &env[i].keysz, sizeof(size_t));
+                  fullwrite(fd, env[i].key, env[i].keysz);
+                }
 
 		fullwrite(fd, &env[i].valsz, sizeof(size_t));
 		fullwrite(fd, env[i].val, env[i].valsz);
